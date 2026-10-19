@@ -24,6 +24,7 @@ class AppletRegistry
         r.Add(new InstallApplet());
         r.Add(new RcApplet());
         r.Add(new VersionApplet());
+        r.Add(new ExpectApplet());
 
         // Native .so applets from ~/.local/lib/x — islands, C ABI only.
         foreach (var so in SoApplet.Discover())
