@@ -20,7 +20,9 @@
 //   quiet = false              # default for -q
 //   echo = true                # pass matched/consumed text through to stdout
 //
-// Script DSL (line-based, # = comment, blank lines ignored):
+// Script DSL (line-based, # = comment, blank lines ignored — a comment is a
+// # at line start or after whitespace, outside double quotes, so patterns
+// containing # survive):
 //   spawn <program> [args...]   start child (one at a time per script)
 //   expect "<literal>"          wait for literal text
 //   expect /<regex>/            wait for regex; /…/i = ignore case
@@ -41,26 +43,22 @@
 // prompts, menus, installers, ssh password prompts, CLI sessions.
 //
 // Integration notes:
-//   - Register in the applet registry next to RcApplet:
-//       registry.AddIfAbsent("expect", new ExpectApplet());
-//     (AddIfAbsent preserves precedence: built-ins > .so > ghosts.)
+//   - Registered in AppletRegistry.Build next to the other built-ins:
+//       r.Add(new ExpectApplet());
+//     (Built-ins are registered first, so precedence — built-ins > .so >
+//     ghosts — is preserved by construction.)
 //   - Name note: `expect` may collide with Tcl Expect on PATH. The symlink
 //     farm's refuse-to-shadow skips it, so `expect` resolves to Tcl on PATH
 //     but `x expect` always works. If a PATH-resolvable name is wanted,
 //     register as "xexpect" and add a ghost: xexpect = "x expect".
-//   - Reads its overlay via the shared layered-TOML config (applets/expect.toml)
-//     if x exposes a typed reader; the reader below degrades to defaults
-//     when no overlay exists, honoring zero-config.
+//   - Reads its overlay through the shared layered-TOML config
+//     (Config.Load("expect"), which merges core + applets/expect.toml and
+//     fails loudly on malformed files). No overlay = zero-config defaults.
 
-using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
-using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Threading;
-using System.Threading.Tasks;
 
 
 class ExpectApplet : IApplet
@@ -89,115 +87,111 @@ class ExpectApplet : IApplet
               default_timeout = 30
               verbose = false
               quiet = false
+              echo = false
             """;
 
-        public int Run(string[] args)
+    public int Run(string[] args)
+    {
+        // ---- flag parsing -------------------------------------------------
+        string? scriptPath = null;
+        bool verbose = false, quiet = false;
+        int timeoutSec = 30;
+
+        for (int i = 0; i < args.Length; i++)
         {
-            // ---- flag parsing -------------------------------------------------
-            string? scriptPath = null;
-            bool verbose = false, quiet = false;
-            int timeoutSec = 30;
-
-            for (int i = 0; i < args.Length; i++)
+            switch (args[i])
             {
-                switch (args[i])
-                {
-                    case "-v": case "--verbose": verbose = true; break;
-                    case "-q": case "--quiet": quiet = true; break;
-                    case "-l": case "--list-commands": Console.WriteLine(DslReference); return 0;
-                    case "-t": case "--timeout":
-                        if (++i >= args.Length || !TryPosInt(args[i], out timeoutSec))
-                        { Console.Error.WriteLine("expect: -t needs a positive integer"); return 64; }
-                        break;
-                    default:
-                        if (scriptPath is null && !args[i].StartsWith('-')) scriptPath = args[i];
-                        else { Console.Error.WriteLine($"expect: unknown option '{args[i]}'"); return 64; }
-                        break;
-                }
+                case "-v": case "--verbose": verbose = true; break;
+                case "-q": case "--quiet": quiet = true; break;
+                case "-l": case "--list-commands": Console.WriteLine(DslReference); return 0;
+                case "-t": case "--timeout":
+                    if (++i >= args.Length || !TryPosInt(args[i], out timeoutSec))
+                    { Console.Error.WriteLine("expect: -t needs a positive integer"); return 64; }
+                    break;
+                default:
+                    if (scriptPath is null && !args[i].StartsWith('-')) scriptPath = args[i];
+                    else { Console.Error.WriteLine($"expect: unknown option '{args[i]}'"); return 64; }
+                    break;
             }
-
-            if (scriptPath is null)
-            {
-                Console.Error.WriteLine("usage: x expect <script.exp> [-v] [-q] [-t <seconds>]");
-                return 64;
-            }
-            if (!File.Exists(scriptPath))
-            {
-                Console.Error.WriteLine($"expect: script not found: {scriptPath}");
-                return 66;
-            }
-
-            // ---- overlay config (optional, zero-config defaults) --------------
-            var cfg = ExpectConfig.Load(verbose, quiet, timeoutSec);
-            verbose = cfg.Verbose; quiet = cfg.Quiet; timeoutSec = cfg.DefaultTimeoutSeconds;
-
-            var steps = ScriptParser.ParseFile(scriptPath);
-            return ScriptRunner.RunAsync(steps, verbose, quiet, timeoutSec)
-                                .GetAwaiter().GetResult();
         }
 
-        private const string DslReference = """
-            expect script commands:
-              spawn <program> [args...]   start the child process
-              expect "<literal>"           wait for literal text
-              expect /<regex>/             wait for regex (/.../i = ignore case)
-              expect eof                   wait for child exit
-              send <text>                  send raw text
-              sendline <text>              send text + newline
-              set <name> = <value>         define variable, used as ${name}
-              timeout <seconds>            timeout for next expect only
-              sleep <ms>                   pause script
-              log <msg>                    write to stderr
-              fail <msg>                   abort with script error
-            regex groups from last expect are available as ${1}, ${2}, ...
-            """;
+        if (scriptPath is null)
+        {
+            Console.Error.WriteLine("usage: x expect <script.exp> [-v] [-q] [-t <seconds>]");
+            return 64;
+        }
+        if (!File.Exists(scriptPath))
+        {
+            Console.Error.WriteLine($"expect: script not found: {scriptPath}");
+            return 66;
+        }
 
-        private static bool TryPosInt(string s, out int v)
-            => int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out v) && v > 0;
+        // ---- overlay config (optional, zero-config defaults) --------------
+        var cfg = ExpectConfig.Load(verbose, quiet, timeoutSec);
+        verbose = cfg.Verbose;
+        quiet = cfg.Quiet;
+        timeoutSec = cfg.DefaultTimeoutSeconds;
+        // -q is a shortcut for echo=false; the overlay can disable echo on
+        // its own but never re-enables it over -q.
+        var echo = cfg.Echo && !quiet;
+
+        var steps = ScriptParser.ParseFile(scriptPath);
+        return ScriptRunner.RunAsync(steps, verbose, echo, timeoutSec)
+                            .GetAwaiter().GetResult();
     }
 
+    private const string DslReference = """
+        expect script commands:
+          spawn <program> [args...]   start the child process
+          expect "<literal>"           wait for literal text
+          expect /<regex>/             wait for regex (/.../i = ignore case)
+          expect eof                   wait for child exit
+          send <text>                  send raw text
+          sendline <text>              send text + newline
+          set <name> = <value>         define variable, used as ${name}
+          timeout <seconds>            timeout for next expect only
+          sleep <ms>                   pause script
+          log <msg>                    write to stderr
+          fail <msg>                   abort with script error
+        regex groups from last expect are available as ${1}, ${2}, ...
+        """;
+
+    private static bool TryPosInt(string s, out int v)
+        => int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out v) && v > 0;
+}
+
     // ------------------------------------------------------------------
-    // Config overlay — applets/expect.toml, optional.
+    // Config overlay — applets/expect.toml, optional. Read through the
+    // shared layered-TOML config: a malformed file fails loudly (handled
+    // at the entry point, per "config is never silently ignored"); a
+    // missing file means zero-config defaults.
     // ------------------------------------------------------------------
     public sealed class ExpectConfig
     {
-        public int DefaultTimeoutSeconds = 30;
-        public bool Verbose;
-        public bool Quiet;
+        public int DefaultTimeoutSeconds { get; init; } = 30;
+        public bool Verbose { get; init; }
+        public bool Quiet { get; init; }
+        public bool Echo { get; init; } = true;
 
         public static ExpectConfig Load(bool verboseDefault, bool quietDefault, int timeoutDefault)
         {
-            var cfg = new ExpectConfig
-            { Verbose = verboseDefault, Quiet = quietDefault, DefaultTimeoutSeconds = timeoutDefault };
-            try
-            {
-                var path = Path.Combine(Environment.GetFolderPath(
-                    Environment.SpecialFolder.UserProfile), ".config/x/applets/expect.toml");
-                if (!File.Exists(path)) return cfg;
-                foreach (var raw in File.ReadLines(path))
-                {
-                    var line = raw.Split('#')[0].Trim();
-                    if (line.Length == 0) continue;
-                    int eq = line.IndexOf('=');
-                    if (eq < 0) continue;
-                    var key = line[..eq].Trim();
-                    var val = line[(eq + 1)..].Trim();
-                    switch (key)
-                    {
-                        case "default_timeout":
-                            if (int.TryParse(val, out int s) && s > 0) cfg.DefaultTimeoutSeconds = s;
-                            break;
-                        case "verbose": cfg.Verbose = ParseBool(val, cfg.Verbose); break;
-                        case "quiet": cfg.Quiet = ParseBool(val, cfg.Quiet); break;
-                    }
-                }
-            }
-            catch { /* config is an overlay, never a crash */ }
-            return cfg;
-        }
+            var raw = Config.Load("expect").Raw;
 
-        private static bool ParseBool(string s, bool fallback)
-            => bool.TryParse(s, out var b) ? b : fallback;
+            bool Bool(string key, bool fallback) =>
+                raw.TryGetValue(key, out var v) && bool.TryParse(v, out var b) ? b : fallback;
+
+            var timeout = int.TryParse(
+                raw.TryGetValue("default_timeout", out var t) ? t : "",
+                out var s) && s > 0 ? s : timeoutDefault;
+
+            return new ExpectConfig
+            {
+                Verbose = Bool("verbose", verboseDefault),
+                Quiet = Bool("quiet", quietDefault),
+                Echo = Bool("echo", true),
+                DefaultTimeoutSeconds = timeout,
+            };
+        }
     }
 
     // ------------------------------------------------------------------
@@ -205,6 +199,11 @@ class ExpectApplet : IApplet
     // ------------------------------------------------------------------
     public sealed class ExpectSession : IDisposable
     {
+        // Scrollback cap: a chatty child must not grow the buffer forever.
+        // Patterns have to match within this window (expect tools bound
+        // scrollback the same way); the head is dropped, the tail kept.
+        private const int MaxBufferChars = 1_000_000;
+
         private readonly Process _proc;
         private readonly StringBuilder _buffer = new();
         private readonly SemaphoreSlim _lock = new(1, 1);
@@ -316,7 +315,12 @@ class ExpectApplet : IApplet
                 while ((n = await reader.ReadAsync(buf, 0, buf.Length)) > 0)
                 {
                     await _lock.WaitAsync();
-                    try { _buffer.Append(buf, 0, n); }
+                    try
+                    {
+                        _buffer.Append(buf, 0, n);
+                        if (_buffer.Length > MaxBufferChars)
+                            _buffer.Remove(0, _buffer.Length - MaxBufferChars);
+                    }
                     finally { _lock.Release(); }
                 }
             }
@@ -345,8 +349,9 @@ class ExpectApplet : IApplet
     // ------------------------------------------------------------------
     public sealed class ScriptStep
     {
-        public string Command = "", Arg = "";
-        public int Line;
+        public string Command { get; init; } = "";
+        public string Arg { get; init; } = "";
+        public int Line { get; init; }
     }
 
     public static class ScriptParser
@@ -357,22 +362,43 @@ class ExpectApplet : IApplet
             var lines = File.ReadAllLines(path);
             for (int i = 0; i < lines.Length; i++)
             {
-                var line = lines[i].Split('#')[0].Trim();
+                var line = StripComment(lines[i]).Trim();
                 if (line.Length == 0) continue;
 
                 int sp = line.IndexOf(' ');
                 var cmd = (sp < 0 ? line : line[..sp]).ToLowerInvariant();
                 var arg = sp < 0 ? "" : line[(sp + 1)..].Trim();
-                if (arg.Length >= 2 && arg[0] == '"') arg = arg[1..^1];
+                // Strip quotes only when both are present — an unterminated
+                // quote stays literal instead of silently losing a character.
+                if (arg.Length >= 2 && arg[0] == '"' && arg[^1] == '"') arg = arg[1..^1];
                 steps.Add(new ScriptStep { Command = cmd, Arg = arg, Line = i + 1 });
             }
             return steps;
+        }
+
+        /// <summary>
+        /// A comment is a '#' outside double quotes that sits at the start of
+        /// the line or after whitespace. A '#' inside a quoted literal or a
+        /// regex (e.g. <c>expect "#tag"</c>, <c>expect /a#b/</c>) is data.
+        /// </summary>
+        private static string StripComment(string line)
+        {
+            var inQuote = false;
+            for (var i = 0; i < line.Length; i++)
+            {
+                var c = line[i];
+                if (c == '"') { inQuote = !inQuote; continue; }
+                if (c == '#' && !inQuote &&
+                    (i == 0 || char.IsWhiteSpace(line[i - 1])))
+                    return line[..i];
+            }
+            return line;
         }
     }
 
     public static class ScriptRunner
     {
-        public static async Task<int> RunAsync(List<ScriptStep> steps, bool verbose, bool quiet, int defaultTimeoutSec)
+        public static async Task<int> RunAsync(List<ScriptStep> steps, bool verbose, bool echo, int defaultTimeoutSec)
         {
             var vars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             ExpectSession? session = null;
@@ -399,7 +425,7 @@ class ExpectApplet : IApplet
                             int sp = arg.IndexOf(' ');
                             var file = sp < 0 ? arg : arg[..sp];
                             var rest = sp < 0 ? "" : arg[(sp + 1)..];
-                            session = ExpectSession.Spawn(file, rest, echo: !quiet);
+                            session = ExpectSession.Spawn(file, rest, echo: echo);
                             if (verbose) Console.Error.WriteLine($"[spawn] {file} {rest}");
                             break;
                         }

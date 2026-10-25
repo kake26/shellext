@@ -39,6 +39,12 @@ class GhostApplet(string name, string expansion, AppletRegistry registry) : IApp
 
     public int Run(string[] args)
     {
+        // Seed the in-process depth from a parent x's shell-path ghost so
+        // loops that cross process boundaries (a = "x a") stay capped.
+        if (_depth == 0 &&
+            int.TryParse(Environment.GetEnvironmentVariable("X_GHOST_DEPTH"), out var seeded))
+            _depth = Math.Clamp(seeded, 0, MaxDepth);
+
         if (_depth >= MaxDepth)
         {
             Console.Error.WriteLine(
@@ -71,7 +77,7 @@ class GhostApplet(string name, string expansion, AppletRegistry registry) : IApp
         }
 
         // Not an applet — treat the expansion as a shell command.
-        return RunShell(expansion, args);
+        return RunShell(Name, expansion, args);
     }
 
     /// Splits an expansion into words the way a shell would: whitespace
@@ -80,7 +86,7 @@ class GhostApplet(string name, string expansion, AppletRegistry registry) : IApp
     /// internal-dispatch path needs this — the shell path hands the raw
     /// expansion to sh, which tokenizes properly on its own.
     /// Unterminated quotes run to the end of the string, leniently.
-    private static string[] Tokenize(string s)
+    internal static string[] Tokenize(string s)
     {
         var tokens = new List<string>();
         var word = new StringBuilder();
@@ -143,9 +149,11 @@ class GhostApplet(string name, string expansion, AppletRegistry registry) : IApp
         return [.. tokens];
     }
 
-    /// /bin/sh -c '<expansion> "$@"' <name> <args...> — $0 is the ghost
+    /// /bin/sh -c '<expansion> "$@"' <ghost name> <args...> — $0 is the ghost
     /// name, $@ carries the caller's arguments, exit code propagates.
-    private static int RunShell(string command, string[] args)
+    /// X_GHOST_DEPTH carries the depth count into any x the shell respawns,
+    /// so ghost loops cannot escape the cap by crossing process boundaries.
+    private static int RunShell(string name, string command, string[] args)
     {
         var psi = new ProcessStartInfo
         {
@@ -154,9 +162,10 @@ class GhostApplet(string name, string expansion, AppletRegistry registry) : IApp
         };
         psi.ArgumentList.Add("-c");
         psi.ArgumentList.Add($"{command} \"$@\"");
-        psi.ArgumentList.Add("x");
+        psi.ArgumentList.Add(name);
         foreach (var a in args)
             psi.ArgumentList.Add(a);
+        psi.EnvironmentVariables["X_GHOST_DEPTH"] = (_depth + 1).ToString();
 
         using var p = Process.Start(psi);
         if (p is null)

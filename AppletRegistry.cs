@@ -21,7 +21,7 @@ class AppletRegistry
         r.Add(new ListApplet(r));
         r.Add(new HelpApplet(r));
         r.Add(new NoteApplet());
-        r.Add(new InstallApplet());
+        r.Add(new InstallApplet(r));
         r.Add(new RcApplet());
         r.Add(new VersionApplet());
         r.Add(new ExpectApplet());

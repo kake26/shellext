@@ -33,13 +33,22 @@ sealed class Config
 
         string Get(string key) => merged.TryGetValue(key, out var v) ? v : "";
 
-        var dataDir = Get("data_dir") is { Length: > 0 } d ? d : dataDirDefault;
+        var dataDir = Get("data_dir") is { Length: > 0 } d ? ExpandTilde(d) : dataDirDefault;
         var dbPath = Get("db_path") is { Length: > 0 } p
-            ? p
+            ? ExpandTilde(p)
             : Path.Combine(dataDir, "x.db");
 
         return new Config { DbPath = dbPath, DataDir = dataDir, Raw = merged };
     }
+
+    /// "~" in a config value means the user profile — same convention
+    /// everywhere, so db_path = "~/x.db" lands in $HOME, not a literal ./~.
+    private static string ExpandTilde(string path) =>
+        path.StartsWith("~")
+            ? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                path[1..].TrimStart('/'))
+            : path;
 
     /// Settings for the rc applet: shell-agnostic rc definitions, read from
     /// the core config only (applet overlays do not apply). Unlike the Raw
@@ -49,50 +58,55 @@ sealed class Config
     {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var corePath = Path.Combine(home, ".config", "x", "x.toml");
+        if (!File.Exists(corePath))
+            return new RcConfig();
 
+        return LoadRcFrom(TomlPairs.ParseDocument(corePath));
+    }
+
+    /// Walks a parsed TOML document into rc settings. Split from LoadRc so
+    /// tests can feed a document directly.
+    public static RcConfig LoadRcFrom(DocumentSyntax doc)
+    {
         var env = new Dictionary<string, string>();
         var pathEntries = new List<string>();
         var aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var raw = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        if (File.Exists(corePath))
+        foreach (var table in doc.Tables)
         {
-            var doc = TomlPairs.ParseDocument(corePath);
-            foreach (var table in doc.Tables)
+            var name = table.Name?.ToString().Trim().ToLowerInvariant();
+            switch (name)
             {
-                var name = table.Name?.ToString().Trim().ToLowerInvariant();
-                switch (name)
-                {
-                    case "env":
-                        foreach (var kv in table.Items)
-                            if (TomlPairs.Scalar(kv.Value) is { } v)
-                                env[kv.Key!.ToString().Trim()] = v;
-                        break;
+                case "env":
+                    foreach (var kv in table.Items)
+                        if (TomlPairs.Scalar(kv.Value) is { } v)
+                            env[kv.Key!.ToString().Trim()] = v;
+                    break;
 
-                    case "path":
-                        foreach (var kv in table.Items)
-                            if (kv.Value is ArraySyntax arr &&
-                                kv.Key!.ToString().Trim().Equals("entries",
-                                    StringComparison.OrdinalIgnoreCase))
-                                foreach (var item in arr.Items)
-                                    if (TomlPairs.Scalar(item.Value) is { } v)
-                                        pathEntries.Add(v);
-                        break;
+                case "path":
+                    foreach (var kv in table.Items)
+                        if (kv.Value is ArraySyntax arr &&
+                            kv.Key!.ToString().Trim().Equals("entries",
+                                StringComparison.OrdinalIgnoreCase))
+                            foreach (var item in arr.Items)
+                                if (TomlPairs.Scalar(item.Value) is { } v)
+                                    pathEntries.Add(v);
+                    break;
 
-                    case "alias":
-                        foreach (var kv in table.Items)
-                            if (TomlPairs.Scalar(kv.Value) is { } v)
-                                aliases[kv.Key!.ToString().Trim()] = v;
-                        break;
+                case "alias":
+                    foreach (var kv in table.Items)
+                        if (TomlPairs.Scalar(kv.Value) is { } v)
+                            aliases[kv.Key!.ToString().Trim()] = v;
+                    break;
 
-                    case var n when n is not null && n.StartsWith("rc.raw_"):
-                        foreach (var kv in table.Items)
-                            if (kv.Key!.ToString().Trim().Equals("body",
-                                    StringComparison.OrdinalIgnoreCase) &&
-                                TomlPairs.Scalar(kv.Value) is { } v)
-                                raw[n["rc.".Length..]] = v;
-                        break;
-                }
+                case var n when n is not null && n.StartsWith("rc.raw_"):
+                    foreach (var kv in table.Items)
+                        if (kv.Key!.ToString().Trim().Equals("body",
+                                StringComparison.OrdinalIgnoreCase) &&
+                            TomlPairs.Scalar(kv.Value) is { } v)
+                            raw[n["rc.".Length..]] = v;
+                    break;
             }
         }
 

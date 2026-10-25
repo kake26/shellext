@@ -41,9 +41,16 @@ class NoteApplet : IApplet
         if (args.Length == 0)
             return Print(conn, $"ORDER BY id DESC LIMIT {max}");
 
-        // x note search <pattern>
-        if (args[0] == "search" && args.Length >= 2)
+        // x note search <pattern> — a missing pattern is a usage error, not
+        // a note that literally says "search".
+        if (args[0] == "search")
         {
+            if (args.Length < 2)
+            {
+                Console.Error.WriteLine("x note: search needs a pattern\nUsage: x note search <pattern>");
+                return 1;
+            }
+
             var pattern = string.Join(' ', args[1..]).ToLowerInvariant();
             return Print(conn, "WHERE instr(lower(body), @p) > 0 ORDER BY id DESC LIMIT 200",
                 ("@p", pattern));

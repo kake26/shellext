@@ -26,6 +26,15 @@ explicitly.
 The binary must keep the name `x` — argv[0]-mode dispatch (below) uses the
 filename to pick the applet.
 
+## Tests
+
+    make test
+
+Unit tests live in `tests/` and cover the pure, edge-case-rich pieces:
+ghost tokenization, TOML reading (`TomlPairs`/`LoadRcFrom`), config path
+expansion (`~`, bare filenames), note usage errors, rc emission per
+shell, and the expect script parser.
+
 ## Versioning
 
 The csproj `<Version>` stamps the binary; `x version` prints it. Bump the

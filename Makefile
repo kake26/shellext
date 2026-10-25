@@ -36,7 +36,7 @@ build-aot:      ## Native AOT publish
 	dotnet publish -c $(CONFIG) -r $(RID) -o $(OUT) /p:PublishAot=true
 
 test:           ## Run tests
-	dotnet test -c $(CONFIG)
+	dotnet test tests/shellext-tests.csproj -c $(CONFIG)
 
 watch:          ## Hot reload dev loop
 	dotnet watch run

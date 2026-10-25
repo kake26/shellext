@@ -7,7 +7,7 @@
 // Refuses to shadow: if a name already exists on PATH as a *different*
 // executable, it warns and skips that symlink rather than hijacking it.
 
-class InstallApplet : IApplet
+class InstallApplet(AppletRegistry registry) : IApplet
 {
     public string Name => "install";
     public string Blurb => "create applet symlinks + PATH entry (opt-in shell setup)";
@@ -33,7 +33,6 @@ class InstallApplet : IApplet
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var binDir = Path.Combine(home, ".local", "bin", BinDirName);
         var selfPath = Environment.ProcessPath!;
-        var registry = AppletRegistry.Build();
 
         Directory.CreateDirectory(binDir);
 
@@ -47,7 +46,14 @@ class InstallApplet : IApplet
                 skipped++;
                 continue;
             }
-            if (File.Exists(link) || Directory.Exists(link))
+            if (Directory.Exists(link))
+            {
+                // A directory squatting on the name: never delete it blindly.
+                Console.Error.WriteLine($"skipped {applet.Name}: a directory occupies {link}");
+                skipped++;
+                continue;
+            }
+            if (File.Exists(link))
                 File.Delete(link); // refresh stale links after rebuilds
             File.CreateSymbolicLink(link, selfPath);
             made++;
