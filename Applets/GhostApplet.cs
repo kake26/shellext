@@ -10,6 +10,11 @@
 //     shell involved (recent -> note search, with x's args appended)
 //   - anything else -> run the expansion via /bin/sh, with x's args
 //     appended as "$@"
+// Placeholders: on the internal path, $0..$9 / ${0..9} in the expansion are
+// substituted with positional args ($0 = the ghost name, mirroring sh);
+// unconsumed args still append at the end, so placeholder-free ghosts keep
+// their append-everything behavior. On the shell path sh provides $0..
+// itself, so placeholders work there verbatim.
 // Ghost chains (ghost -> ghost) are allowed up to MaxDepth levels, so a
 // ghost loop fails with a clear error instead of recursing forever.
 
@@ -35,6 +40,14 @@ class GhostApplet(string name, string expansion, AppletRegistry registry) : IApp
         Arguments given to 'x {Name}' are appended to the expansion. If the
         first word is a registered applet it runs inside x; otherwise the
         expansion runs via /bin/sh.
+
+        Placeholders: $1..$9 in the expansion (multi-digit via braces) are
+        replaced by the positional arguments — x {Name} "my title" -p high with
+        {Name} = "ticket add $1 -t bug" runs:
+            ticket add "my title" -t bug -p high
+        $0 is the ghost name. Args not referenced by a placeholder are still
+        appended at the end. A $N with no matching argument is an error.
+        On the shell path /bin/sh provides $0, $1, ... itself.
         """;
 
     public int Run(string[] args)
@@ -60,15 +73,20 @@ class GhostApplet(string name, string expansion, AppletRegistry registry) : IApp
         }
 
         var head = tokens[0].ToLowerInvariant();
-        var rest = tokens[1..].Concat(args).ToArray();
 
         // Internal re-dispatch: applets stay inside the x process.
         if (registry.TryGet(head, out var target))
         {
+            var expanded = Expand(tokens[1..], args, Name, out var err);
+            if (expanded is null)
+            {
+                Console.Error.WriteLine($"x: ghost '{Name}': {err}");
+                return 1;
+            }
             _depth++;
             try
             {
-                return target.Run(rest);
+                return target.Run(expanded);
             }
             finally
             {
@@ -147,6 +165,80 @@ class GhostApplet(string name, string expansion, AppletRegistry registry) : IApp
             tokens.Add(word.ToString());
 
         return [.. tokens];
+    }
+
+    /// Expands $N / ${N} placeholders in the expansion tokens against the
+    /// caller's args: $0 is the ghost name (mirroring the shell path, where
+    /// sh -c receives the ghost name as $0), $1.. are the args. An arg
+    /// referenced by a placeholder is consumed; unconsumed args are appended
+    /// after the expansion tokens, so placeholder-free ghosts keep their
+    /// append-everything behavior. A referenced $N with no matching arg is
+    /// an error, not an empty string. A '$' not followed by a digit or '{'
+    /// passes through literally. Note quotes are already stripped by
+    /// Tokenize, so '$1' expands too — use the shell path for a literal $.
+    internal static string[]? Expand(string[] tokens, string[] args, string name, out string? error)
+    {
+        var used = new bool[args.Length];
+        var result = new List<string>(tokens.Length + args.Length);
+
+        foreach (var token in tokens)
+        {
+            var sb = new StringBuilder(token.Length);
+            for (var i = 0; i < token.Length; i++)
+            {
+                if (token[i] != '$' || i + 1 >= token.Length)
+                {
+                    sb.Append(token[i]);
+                    continue;
+                }
+
+                int n, next;
+                if (token[i + 1] == '{')
+                {
+                    var close = token.IndexOf('}', i + 2);
+                    if (close < 0 || !int.TryParse(token[(i + 2)..close], out n) || n < 0)
+                    {
+                        sb.Append(token[i]);
+                        continue;
+                    }
+                    next = close + 1;
+                }
+                else if (char.IsDigit(token[i + 1]))
+                {
+                    n = token[i + 1] - '0';
+                    next = i + 2;
+                }
+                else
+                {
+                    sb.Append(token[i]);
+                    continue;
+                }
+
+                if (n == 0)
+                {
+                    sb.Append(name);
+                }
+                else if (n - 1 < args.Length)
+                {
+                    used[n - 1] = true;
+                    sb.Append(args[n - 1]);
+                }
+                else
+                {
+                    error = $"${n} has no matching argument ({args.Length} given)";
+                    return null;
+                }
+                i = next - 1;
+            }
+            result.Add(sb.ToString());
+        }
+
+        for (var i = 0; i < args.Length; i++)
+            if (!used[i])
+                result.Add(args[i]);
+
+        error = null;
+        return [.. result];
     }
 
     /// /bin/sh -c '<expansion> "$@"' <ghost name> <args...> — $0 is the ghost

@@ -191,6 +191,21 @@ Arguments given to the ghost are appended to the expansion; exit codes
 propagate. Ghost chains work (a ghost targeting a ghost) up to 8 levels —
 a ghost loop fails with a clear error instead of recursing forever.
 
+Placeholders: `$1`..`$9` (or `${1}`) in the expansion are replaced by the
+positional arguments (`$0` is the ghost name). Args referenced by a
+placeholder are consumed; unreferenced args still append at the end, so
+plain ghosts are unaffected. On the internal (applet) path this is done by
+x itself; on the shell path `/bin/sh` provides `$0`, `$1`, ... natively.
+
+```toml
+[ghosts]
+t = "ticket add $1 -d $2 -t $3 -t bug"   # x t "Fix login" "body" auth -p urgent
+```
+
+runs `ticket add "Fix login" -d "body" -t auth -t bug -p urgent` — the
+extra `-p urgent` was unreferenced, so it appended. A `$N` with no matching
+argument is an error, not an empty string.
+
 Expansions are tokenized like a shell would: quotes group a phrase into
 one argument (`recent = "note search 'hello world'"` passes
 `hello world` as a single argument), and a backslash escapes the next
