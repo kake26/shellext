@@ -1,8 +1,8 @@
 # x — busybox-style shell extender
 
 A single standalone binary that hosts small command-line "applets" — notes,
-and whatever else you add. Dispatch is shell-agnostic: every shell resolves
-`PATH` identically, so there is no per-shell plugin code.
+tickets, and whatever else you add. Dispatch is shell-agnostic: every shell
+resolves `PATH` identically, so there is no per-shell plugin code.
 
     x <applet> [args...]     run an applet
     x list                   list applets
@@ -31,9 +31,11 @@ filename to pick the applet.
     make test
 
 Unit tests live in `tests/` and cover the pure, edge-case-rich pieces:
-ghost tokenization, TOML reading (`TomlPairs`/`LoadRcFrom`), config path
-expansion (`~`, bare filenames), note usage errors, rc emission per
-shell, and the expect script parser.
+ghost tokenization and `$N` placeholder expansion, TOML reading
+(`TomlPairs`/`LoadRcFrom`), config path expansion (`~`, bare filenames),
+note usage errors, rc emission per shell, and the expect script parser.
+Home-dependent tests drive the real applets (note, ticket) against a temp
+`HOME`, including the ticket schema migration.
 
 ## Versioning
 
@@ -78,12 +80,16 @@ a config-defined name can never shadow a real applet.
 
 | Applet    | Blurb                                                        |
 | --------- | ------------------------------------------------------------ |
-| `list`    | list all applets                                             |
+| `expect`  | script-driven interactive automation (expect-style)          |
 | `help`    | help for one or all applets                                  |
-| `note`    | quick notes: append, read, search                            |
-| `install` | create applet symlinks + PATH entry (opt-in)                  |
-| `rc`      | emit shell rc content (env/path/alias/raw) from x.toml        |
+| `install` | create applet symlinks + PATH entry (opt-in shell setup)     |
+| `list`    | list all applets                                             |
+| `note`    | quick notes (append/read)                                    |
+| `rc`      | emit shell rc content (env/path/alias/raw) from x.toml       |
+| `ticket`  | x's ticket system                                            |
 | `version` | print the x version                                          |
+
+(same order as `x list`; blurbs are the applets' own `Blurb` strings)
 
     x note <text>              append a timestamped note
     x note                     show the last max_results notes (default 20)
@@ -92,6 +98,58 @@ a config-defined name can never shadow a real applet.
 `max_results` is a per-applet override (`~/.config/x/applets/note.toml`)
 capping the default listing; unparseable or non-positive values fall back
 to 20. Search always caps at 200.
+
+### The ticket applet — tickets in SQLite
+
+    x ticket                        list open tickets (newest first)
+    x ticket all                    list all, including done
+    x ticket list dev               list one queue (or: list -q dev; case-insensitive)
+    x ticket list --sort priority   urgent first, then id
+    x ticket add <title...> [-q dev] [-p high] [-t bug]... [-d "text"]...
+    x ticket show 3                 full ticket, including body
+    x ticket edit 3 -p urgent       change fields (only the ones given)
+    x ticket move 3 work            reassign to another queue
+    x ticket comment 3 <text...>    append a comment (additive, never replaces body)
+    x ticket comments 3             list a ticket's comments
+    x ticket done 3 / reopen 3 / rm 3
+    x ticket search login [-q dev] [--all]
+    x ticket tags                   tags on open tickets, with counts
+    x ticket queues                 queues with open-ticket counts
+
+Each ticket has a title (free words, joined), a body (`-d`, repeatable),
+a priority (`low < normal < high < urgent`, default `normal`), tags
+(`-t`, repeatable, stored without `#`, matched case-insensitively and
+exactly), a queue (the category — `dev`, `work`, ... — default
+`default`), a status (`open`/`done`, with `created`/`closed`
+timestamps), and an additive comment thread (`comment`/`comments` — shown
+by `show` under the body, included in `search`, deleted with the ticket;
+`edit -d` replaces only the body). Titles and comment text never need
+quotes; `-d`/`-t`/`-q`/`-p` values do when they contain spaces, since each
+flag consumes exactly one argument.
+
+Listings are colorized on a terminal: the priority sets the color (urgent
+bold red, high yellow, normal cyan, low gray), queues print green as
+`[dev]`, tags magenta as `#tag`, done tickets print struck-through. Piped
+output is plain; `NO_COLOR` and `TERM=dumb` disable colors. Empty
+listings exit 1.
+
+    # ~/.config/x/applets/ticket.toml
+    max_results = 50     # cap for list/search
+    color = true         # force colors even when piped
+
+### The expect applet — script-driven automation
+
+    x expect <script.exp> [-v] [-q] [-t <seconds>]
+    x expect -l             # DSL reference
+
+Spawns a child and drives it expect-style: `expect "literal"` /
+`expect /regex/` (capture groups become `${1}`, `${2}`, ...), `send` /
+`sendline`, `set name = value`, `timeout` (next step only), `sleep`,
+`log`, `fail`, `expect eof`. Full reference: `x help expect`. Exit codes:
+0 ok (child's code after `expect eof`), 1 script error, 2 timeout,
+3 child died before match, 64 usage. Optional overlay
+`~/.config/x/applets/expect.toml` (`default_timeout`, `verbose`,
+`quiet`, `echo`).
 
 ### The rc applet — your rc file, generated
 
@@ -231,7 +289,9 @@ define them.
 ## Storage
 
 One SQLite database at `db_path` (default `~/.local/share/x/x.db`), opened
-per applet invocation. No daemon, no network, no external state.
+per applet invocation; applets declare their own tables (`notes`,
+`tickets`, migrated in place when the schema grows). No daemon, no
+network, no external state.
 
 ## Adding an applet
 
@@ -275,6 +335,7 @@ AppletRegistry.cs       IApplet interface + registry (built-in > .so > ghost)
 Config.cs               config surface + Tomlyn reading (Raw, ghosts, rc)
 Db.cs                   SQLite connection helper
 Applets/                one file per applet (+ GhostApplet, SoApplet)
+tests/                  unit + home-dependent tests (make test)
 ```
 
 ## AOT constraints honored by the code

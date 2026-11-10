@@ -218,6 +218,169 @@ public class HomeDependentTests : IDisposable
         // ignored, unlike the old hand-rolled parser.
         Assert.Throws<InvalidDataException>(() => ExpectConfig.Load(false, false, 30));
     }
+
+    // --- ticket -----------------------------------------------------------
+
+    private (int Exit, string Stdout, string Stderr) RunTicket(params string[] args)
+    {
+        SetHome();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var oldOut = Console.Out;
+        var oldErr = Console.Error;
+        Console.SetOut(stdout);
+        Console.SetError(stderr);
+        try
+        {
+            var rc = new TicketApplet().Run(args);
+            return (rc, stdout.ToString(), stderr.ToString());
+        }
+        finally
+        {
+            Console.SetOut(oldOut);
+            Console.SetError(oldErr);
+        }
+    }
+
+    [Fact]
+    public void TicketAddDefaultsToDefaultQueue()
+    {
+        var (exit, stdout, _) = RunTicket("add", "alpha task");
+        Assert.Equal(0, exit);
+        Assert.Contains("[default]", stdout);
+
+        var (_, show, _) = RunTicket("show", "1");
+        Assert.Contains("queue:", show);
+        Assert.Contains("default", show);
+    }
+
+    [Fact]
+    public void TicketListFiltersByQueueCaseInsensitively()
+    {
+        RunTicket("add", "alpha-task", "-q", "dev");
+        RunTicket("add", "beta-task", "-q", "work");
+
+        // Bare word on list is the queue filter; matching ignores case.
+        var (exit, stdout, _) = RunTicket("list", "DEV");
+        Assert.Equal(0, exit);
+        Assert.Contains("alpha-task", stdout);
+        Assert.DoesNotContain("beta-task", stdout);
+
+        var (_, stdoutQ, _) = RunTicket("list", "-q", "work");
+        Assert.Contains("beta-task", stdoutQ);
+        Assert.DoesNotContain("alpha-task", stdoutQ);
+    }
+
+    [Fact]
+    public void TicketMoveReassignsQueue()
+    {
+        RunTicket("add", "gamma-task", "-q", "dev");
+        var (exit, stdout, _) = RunTicket("move", "1", "work");
+        Assert.Equal(0, exit);
+        Assert.Contains("[work]", stdout);
+
+        var (_, dev, _) = RunTicket("list", "dev");
+        Assert.DoesNotContain("gamma-task", dev);
+        var (_, work, _) = RunTicket("list", "work");
+        Assert.Contains("gamma-task", work);
+    }
+
+    [Fact]
+    public void TicketQueuesListsOpenCounts()
+    {
+        RunTicket("add", "one", "-q", "dev");
+        RunTicket("add", "two", "-q", "dev");
+        RunTicket("add", "three", "-q", "work");
+        RunTicket("done", "3");
+
+        var (exit, stdout, _) = RunTicket("queues");
+        Assert.Equal(0, exit);
+        Assert.Contains("[dev]", stdout);
+        Assert.Contains("(2)", stdout);
+        Assert.DoesNotContain("[work]", stdout);   // only open tickets counted
+    }
+
+    [Fact]
+    public void TicketMigratesPreQueueDatabase()
+    {
+        SetHome();
+        // Simulate a database from before the queue column existed.
+        var cfg = Config.Load("ticket");
+        using (var conn = Db.Open(cfg))
+        {
+            Db.Exec(conn, """
+                CREATE TABLE tickets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL DEFAULT '',
+                    priority TEXT NOT NULL DEFAULT 'normal',
+                    tags TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'open',
+                    created TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                    closed TEXT
+                );
+                """);
+            Db.Exec(conn, "INSERT INTO tickets (title) VALUES ('old ticket')");
+        }
+
+        var (exit, stdout, _) = RunTicket("all");
+        Assert.Equal(0, exit);
+        Assert.Contains("old ticket", stdout);
+        Assert.Contains("[default]", stdout);
+    }
+
+    [Fact]
+    public void TicketCommentAppendsAndEditKeepsComments()
+    {
+        RunTicket("add", "task");
+        Assert.Equal(0, RunTicket("comment", "1", "first", "note").Exit);
+        Assert.Equal(0, RunTicket("comment", "1", "second note").Exit);
+
+        var (_, show, _) = RunTicket("show", "1");
+        Assert.Contains("comments:", show);
+        Assert.Contains("first note", show);
+        Assert.Contains("second note", show);
+
+        // edit -d replaces the body only; the comment thread survives.
+        Assert.Equal(0, RunTicket("edit", "1", "-d", "new body").Exit);
+        var (_, show2, _) = RunTicket("show", "1");
+        Assert.Contains("new body", show2);
+        Assert.Contains("first note", show2);
+
+        // comments verb lists them standalone
+        var (exit, cout, _) = RunTicket("comments", "1");
+        Assert.Equal(0, exit);
+        Assert.Contains("second note", cout);
+    }
+
+    [Fact]
+    public void TicketCommentOnMissingTicketFails()
+    {
+        var (exit, _, stderr) = RunTicket("comment", "9", "hi");
+        Assert.Equal(1, exit);
+        Assert.Contains("no ticket #9", stderr);
+    }
+
+    [Fact]
+    public void TicketSearchFindsCommentText()
+    {
+        RunTicket("add", "some task");
+        RunTicket("comment", "1", "uniquecommentword");
+        var (exit, stdout, _) = RunTicket("search", "uniquecommentword");
+        Assert.Equal(0, exit);
+        Assert.Contains("some task", stdout);
+    }
+
+    [Fact]
+    public void TicketRmRemovesCommentsToo()
+    {
+        RunTicket("add", "doomed task");
+        RunTicket("comment", "1", "thread word");
+        Assert.Equal(0, RunTicket("rm", "1").Exit);
+        var (exit, _, stderr) = RunTicket("comments", "1");
+        Assert.Equal(1, exit);
+        Assert.Contains("no ticket #1", stderr);
+    }
 }
 
 file static class StringExt
